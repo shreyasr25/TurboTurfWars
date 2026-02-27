@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TURBO TURF WARS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a1a;
+    overflow: hidden;
+    font-family: 'Segoe UI', sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    user-select: none;
+  }
+  canvas { display: block; border-radius: 8px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ============================================================
+//  TURBO TURF WARS — 2-Player Local Competitive Territory Game
+// ============================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// --- Layout ---
+const W = Math.min(window.innerWidth, 1280);
+const H = Math.min(window.innerHeight, 800);
+canvas.width = W;
+canvas.height = H;
+
+const CELL = 20;
+const ARENA_MARGIN_TOP = 70;
+const ARENA_MARGIN_SIDE = 20;
+const COLS = Math.floor((W - ARENA_MARGIN_SIDE * 2) / CELL);
+const ROWS = Math.floor((H - ARENA_MARGIN_TOP - 20) / CELL);
+const AX = Math.floor((W - COLS * CELL) / 2);
+const AY = ARENA_MARGIN_TOP;
+
+// --- Colors ---
+const P1_COLOR = '#ff4466';
+const P1_LIGHT = '#ff8899';
+const P1_DARK  = '#cc1133';
+const P1_TRAIL = 'rgba(255,68,102,0.35)';
+const P2_COLOR = '#44aaff';
+const P2_LIGHT = '#88ccff';
+const P2_DARK  = '#1177cc';
+const P2_TRAIL = 'rgba(68,170,255,0.35)';
+const WALL_COLOR = '#2a2a4a';
+const BG_COLOR = '#12122a';
+const GRID_COLOR = 'rgba(255,255,255,0.04)';
+
+// --- Game State ---
+const ROUND_TIME = 75; // seconds per round
+const TOTAL_ROUNDS = 3;
+let state = 'menu'; // menu, countdown, playing, roundEnd, gameOver
+let roundNum = 0;
+let p1Wins = 0, p2Wins = 0;
+let timer = 0;
+let countdownTimer = 0;
+let grid = []; // 0=empty, 1=P1, 2=P2, 9=wall
+let powerups = [];
+let particles = [];
+let shakeTimer = 0;
+let shakeIntensity = 0;
+let frameCount = 0;
+
+// --- Power-up types ---
+const PU_SPEED  = 0;
+const PU_BOMB   = 1;
+const PU_FREEZE = 2;
+const PU_SHIELD = 3;
+const PU_MAGNET = 4;
+const PU_NAMES = ['BOOST', 'BOMB', 'FREEZE', 'SHIELD', 'MAGNET'];
+const PU_COLORS = ['#ffcc00', '#ff6600', '#00ccff', '#66ff66', '#ff66ff'];
+const PU_ICONS = ['⚡', '💥', '❄️', '🛡️', '🧲'];
+
+// --- Player class ---
+class Car {
+  constructor(id, x, y, color, lightColor, darkColor, trailColor) {
+    this.id = id;
+    this.x = x; this.y = y;
+    this.spawnX = x; this.spawnY = y;
+    this.vx = 0; this.vy = 0;
+    this.angle = 0;
+    this.targetAngle = 0;
+    this.speed = 0;
+    this.maxSpeed = 2.8;
+    this.baseMaxSpeed = 2.8;
+    this.accel = 0.15;
+    this.friction = 0.92;
+    this.color = color;
+    this.lightColor = lightColor;
+    this.darkColor = darkColor;
+    this.trailColor = trailColor;
+    this.score = 0;
+    this.trail = [];
+    this.boosted = 0;
+    this.frozen = 0;
+    this.shielded = 0;
+    this.magnetized = 0;
+    this.powerupFlash = 0;
+    this.powerupText = '';
+    this.driftAngle = 0;
+    this.alive = true;
+    this.input = { up: false, down: false, left: false, right: false };
+  }
+
+  reset(x, y) {
+    this.x = x; this.y = y;
+    this.spawnX = x; this.spawnY = y;
+    this.vx = 0; this.vy = 0;
+    this.speed = 0;
+    this.angle = 0;
+    this.score = 0;
+    this.trail = [];
+    this.boosted = 0;
+    this.frozen = 0;
+    this.shielded = 0;
+    this.magnetized = 0;
+    this.powerupFlash = 0;
+    this.alive = true;
+  }
+
+  applyPowerup(type) {
+    this.powerupFlash = 60;
+    this.powerupText = PU_NAMES[type];
+    if (type === PU_SPEED) this.boosted = 240;
+    if (type === PU_FREEZE) {
+      const other = this.id === 1 ? p2 : p1;
+      other.frozen = 180;
+      screenShake(5, 10);
+    }
+    if (type === PU_SHIELD) this.shielded = 300;
+    if (type === PU_MAGNET) this.magnetized = 300;
+    if (type === PU_BOMB) {
+      const cx = Math.floor((this.x - AX) / CELL);
+      const cy = Math.floor((this.y - AY) / CELL);
+      const r = 4;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (dx*dx + dy*dy <= r*r) {
+            const nx = cx + dx, ny = cy + dy;
+            if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS && grid[ny][nx] !== 9) {
+              grid[ny][nx] = this.id;
+              spawnParticle(AX + nx * CELL + CELL/2, AY + ny * CELL + CELL/2, this.color, 3);
+            }
+          }
+        }
+      }
+      screenShake(12, 20);
+    }
+  }
+
+  update(dt) {
+    if (this.frozen > 0) {
+      this.frozen--;
+      this.vx *= 0.85;
+      this.vy *= 0.85;
+      this.maxSpeed = this.baseMaxSpeed * 0.2;
+    } else {
+      this.maxSpeed = this.boosted > 0 ? this.baseMaxSpeed * 1.6 : this.baseMaxSpeed;
+    }
+    if (this.boosted > 0) this.boosted--;
+    if (this.shielded > 0) this.shielded--;
+    if (this.magnetized > 0) this.magnetized--;
+    if (this.powerupFlash > 0) this.powerupFlash--;
+
+    let ax = 0, ay = 0;
+    if (this.input.up) ay -= 1;
+    if (this.input.down) ay += 1;
+    if (this.input.left) ax -= 1;
+    if (this.input.right) ax += 1;
+    const len = Math.sqrt(ax*ax + ay*ay);
+    if (len > 0) { ax /= len; ay /= len; }
+
+    this.vx += ax * this.accel;
+    this.vy += ay * this.accel;
+    this.vx *= this.friction;
+    this.vy *= this.friction;
+
+    const spd = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+    if (spd > this.maxSpeed) {
+      this.vx = (this.vx/spd) * this.maxSpeed;
+      this.vy = (this.vy/spd) * this.maxSpeed;
+    }
+
+    if (spd > 0.3) {
+      this.targetAngle = Math.atan2(this.vy, this.vx);
+    }
+    let diff = this.targetAngle - this.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    this.angle += diff * 0.2;
+    this.driftAngle = diff * 0.5;
+
+    let nx = this.x + this.vx;
+    let ny = this.y + this.vy;
+
+    // Wall collision
+    const margin = 8;
+    if (nx < AX + margin) { nx = AX + margin; this.vx *= -0.3; }
+    if (nx > AX + COLS * CELL - margin) { nx = AX + COLS * CELL - margin; this.vx *= -0.3; }
+    if (ny < AY + margin) { ny = AY + margin; this.vy *= -0.3; }
+    if (ny > AY + ROWS * CELL - margin) { ny = AY + ROWS * CELL - margin; this.vy *= -0.3; }
+
+    // Obstacle collision
+    const gcx = Math.floor((nx - AX) / CELL);
+    const gcy = Math.floor((ny - AY) / CELL);
+    if (gcx >= 0 && gcx < COLS && gcy >= 0 && gcy < ROWS && grid[gcy][gcx] === 9) {
+      nx = this.x; ny = this.y;
+      this.vx *= -0.5; this.vy *= -0.5;
+    }
+
+    this.x = nx; this.y = ny;
+
+    // Paint territory
+    const cellX = Math.floor((this.x - AX) / CELL);
+    const cellY = Math.floor((this.y - AY) / CELL);
+    if (cellX >= 0 && cellX < COLS && cellY >= 0 && cellY < ROWS && grid[cellY][cellX] !== 9) {
+      const prev = grid[cellY][cellX];
+      if (prev !== this.id) {
+        if (prev !== 0 && this.id !== prev) {
+          if (this.shielded <= 0 && (this.id === 1 ? p2 : p1).shielded > 0) {
+            // can't steal shielded territory
+          } else {
+            grid[cellY][cellX] = this.id;
+            spawnParticle(AX + cellX * CELL + CELL/2, AY + cellY * CELL + CELL/2, this.color, 2);
+          }
+        } else {
+          grid[cellY][cellX] = this.id;
+        }
+      }
+    }
+
+    // Magnet: claim nearby unclaimed cells
+    if (this.magnetized > 0) {
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const mx = cellX + dx, my = cellY + dy;
+          if (mx >= 0 && mx < COLS && my >= 0 && my < ROWS && grid[my][mx] === 0) {
+            if (Math.random() < 0.05) grid[my][mx] = this.id;
+          }
+        }
+      }
+    }
+
+    // Trail
+    if (spd > 0.5) {
+      this.trail.push({ x: this.x, y: this.y, life: 30 });
+    }
+    this.trail = this.trail.filter(t => { t.life--; return t.life > 0; });
+  }
+
+  draw() {
+    const spd = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+
+    // Trail
+    ctx.save();
+    for (const t of this.trail) {
+      const a = t.life / 30;
+      ctx.globalAlpha = a * 0.4;
+      ctx.fillStyle = this.color;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, 3 * a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle + this.driftAngle * 0.3);
+
+    // Boost flame
+    if (this.boosted > 0) {
+      const fl = 8 + Math.random() * 6;
+      ctx.fillStyle = '#ffaa00';
+      ctx.globalAlpha = 0.8;
+      ctx.beginPath();
+      ctx.moveTo(-12, -3);
+      ctx.lineTo(-12 - fl, 0);
+      ctx.moveTo(-12, 3);
+      ctx.lineTo(-12 - fl, 0);
+      ctx.lineTo(-12, -3);
+      ctx.fill();
+      ctx.fillStyle = '#ff4400';
+      ctx.beginPath();
+      ctx.moveTo(-12, -2);
+      ctx.lineTo(-12 - fl * 0.6, 0);
+      ctx.lineTo(-12, 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Shield glow
+    if (this.shielded > 0) {
+      ctx.strokeStyle = '#66ff66';
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.4 + Math.sin(frameCount * 0.15) * 0.2;
+      ctx.beginPath();
+      ctx.arc(0, 0, 16, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Freeze visual
+    if (this.frozen > 0) {
+      ctx.strokeStyle = '#88eeff';
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Car body
+    ctx.fillStyle = this.darkColor;
+    roundRect(-11, -7, 22, 14, 3);
+    ctx.fill();
+    ctx.fillStyle = this.color;
+    roundRect(-10, -6, 20, 12, 3);
+    ctx.fill();
+
+    // Windshield
+    ctx.fillStyle = this.lightColor;
+    ctx.globalAlpha = 0.7;
+    roundRect(2, -4, 6, 8, 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // Wheels
+    ctx.fillStyle = '#222';
+    ctx.fillRect(-8, -8, 5, 3);
+    ctx.fillRect(-8, 5, 5, 3);
+    ctx.fillRect(3, -8, 5, 3);
+    ctx.fillRect(3, 5, 5, 3);
+
+    // Speed lines
+    if (spd > 2) {
+      ctx.strokeStyle = this.lightColor;
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 3; i++) {
+        const lx = -14 - Math.random() * 8;
+        const ly = -4 + Math.random() * 8;
+        ctx.beginPath();
+        ctx.moveTo(lx, ly);
+        ctx.lineTo(lx - 6 - Math.random() * 4, ly);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+
+    // Powerup text
+    if (this.powerupFlash > 0) {
+      ctx.save();
+      ctx.globalAlpha = this.powerupFlash / 60;
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 12px "Segoe UI"';
+      ctx.textAlign = 'center';
+      ctx.fillText(this.powerupText + '!', this.x, this.y - 20 - (60 - this.powerupFlash) * 0.5);
+      ctx.restore();
+    }
+
+    // Magnet indicator
+    if (this.magnetized > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.3 + Math.sin(frameCount * 0.1) * 0.15;
+      ctx.strokeStyle = '#ff66ff';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 40, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+}
+
+let p1, p2;
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// --- Particles ---
+function spawnParticle(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 4,
+      vy: (Math.random() - 0.5) * 4,
+      life: 20 + Math.random() * 15,
+      maxLife: 35,
+      color,
+      size: 2 + Math.random() * 3,
+    });
+  }
+}
+
+function screenShake(intensity, duration) {
+  shakeIntensity = intensity;
+  shakeTimer = duration;
+}
+
+// --- Grid generation ---
+function generateGrid() {
+  grid = [];
+  for (let y = 0; y < ROWS; y++) {
+    grid[y] = [];
+    for (let x = 0; x < COLS; x++) {
+      grid[y][x] = 0;
+    }
+  }
+
+  // Create interesting wall patterns
+  const patterns = [
+    () => { // Cross barriers
+      const mx = Math.floor(COLS / 2);
+      const my = Math.floor(ROWS / 2);
+      for (let i = -3; i <= 3; i++) {
+        if (my + i >= 0 && my + i < ROWS) { grid[my+i][mx-8] = 9; grid[my+i][mx+8] = 9; }
+        if (mx + i >= 0 && mx + i < COLS) { grid[my-6][mx+i] = 9; grid[my+6][mx+i] = 9; }
+      }
+    },
+    () => { // Diamond
+      const mx = Math.floor(COLS / 2);
+      const my = Math.floor(ROWS / 2);
+      const s = Math.min(6, Math.floor(ROWS/4));
+      for (let i = 0; i <= s; i++) {
+        if (my-i >= 0 && mx-s+i >= 0) grid[my-i][mx-s+i] = 9;
+        if (my-i >= 0 && mx+s-i < COLS) grid[my-i][mx+s-i] = 9;
+        if (my+i < ROWS && mx-s+i >= 0) grid[my+i][mx-s+i] = 9;
+        if (my+i < ROWS && mx+s-i < COLS) grid[my+i][mx+s-i] = 9;
+      }
+    },
+    () => { // Scattered blocks
+      for (let b = 0; b < 12; b++) {
+        const bx = 4 + Math.floor(Math.random() * (COLS - 8));
+        const by = 3 + Math.floor(Math.random() * (ROWS - 6));
+        const bw = 2 + Math.floor(Math.random() * 3);
+        const bh = 2 + Math.floor(Math.random() * 2);
+        for (let dy = 0; dy < bh; dy++) {
+          for (let dx = 0; dx < bw; dx++) {
+            if (by+dy < ROWS && bx+dx < COLS) grid[by+dy][bx+dx] = 9;
+          }
+        }
+      }
+    },
+    () => { // Lanes
+      const lanes = 3;
+      const gap = Math.floor(ROWS / (lanes + 1));
+      for (let l = 1; l <= lanes; l++) {
+        const y = l * gap;
+        const holeStart = Math.floor(Math.random() * (COLS - 6));
+        for (let x = 0; x < COLS; x++) {
+          if (x < holeStart || x > holeStart + 5) {
+            if (y < ROWS) grid[y][x] = 9;
+          }
+        }
+      }
+    },
+  ];
+
+  patterns[Math.floor(Math.random() * patterns.length)]();
+
+  // Clear spawn areas
+  const clearRadius = 4;
+  for (let dy = -clearRadius; dy <= clearRadius; dy++) {
+    for (let dx = -clearRadius; dx <= clearRadius; dx++) {
+      const x1 = 3 + dx, y1 = Math.floor(ROWS/2) + dy;
+      const x2 = COLS - 4 + dx, y2 = Math.floor(ROWS/2) + dy;
+      if (x1 >= 0 && x1 < COLS && y1 >= 0 && y1 < ROWS) grid[y1][x1] = 0;
+      if (x2 >= 0 && x2 < COLS && y2 >= 0 && y2 < ROWS) grid[y2][x2] = 0;
+    }
+  }
+}
+
+// --- Powerup spawning ---
+function spawnPowerup() {
+  let tries = 50;
+  while (tries-- > 0) {
+    const x = Math.floor(Math.random() * COLS);
+    const y = Math.floor(Math.random() * ROWS);
+    if (grid[y][x] !== 9) {
+      const type = Math.floor(Math.random() * 5);
+      powerups.push({
+        x: AX + x * CELL + CELL/2,
+        y: AY + y * CELL + CELL/2,
+        type,
+        life: 600,
+        bobPhase: Math.random() * Math.PI * 2,
+      });
+      return;
+    }
+  }
+}
+
+// --- Score counting ---
+function countScores() {
+  let s1 = 0, s2 = 0;
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      if (grid[y][x] === 1) s1++;
+      if (grid[y][x] === 2) s2++;
+    }
+  }
+  return [s1, s2];
+}
+
+// --- Game flow ---
+function startRound() {
+  roundNum++;
+  generateGrid();
+  powerups = [];
+  particles = [];
+  timer = ROUND_TIME * 60;
+
+  const spawnY = AY + Math.floor(ROWS/2) * CELL + CELL/2;
+  p1 = new Car(1, AX + 3 * CELL + CELL/2, spawnY, P1_COLOR, P1_LIGHT, P1_DARK, P1_TRAIL);
+  p2 = new Car(2, AX + (COLS-4) * CELL + CELL/2, spawnY, P2_COLOR, P2_LIGHT, P2_DARK, P2_TRAIL);
+
+  state = 'countdown';
+  countdownTimer = 180; // 3 seconds
+}
+
+function endRound() {
+  const [s1, s2] = countScores();
+  p1.score = s1;
+  p2.score = s2;
+  if (s1 > s2) p1Wins++;
+  else if (s2 > s1) p2Wins++;
+  state = 'roundEnd';
+  countdownTimer = 240;
+}
+
+function resetGame() {
+  roundNum = 0;
+  p1Wins = 0;
+  p2Wins = 0;
+  state = 'menu';
+}
+
+// --- Input ---
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (state === 'menu' && e.code === 'Space') {
+    startRound();
+  }
+  if (state === 'gameOver' && e.code === 'Space') {
+    resetGame();
+  }
+  if (state === 'roundEnd' && countdownTimer < 120 && e.code === 'Space') {
+    if (p1Wins >= Math.ceil(TOTAL_ROUNDS/2) || p2Wins >= Math.ceil(TOTAL_ROUNDS/2) || roundNum >= TOTAL_ROUNDS) {
+      state = 'gameOver';
+    } else {
+      startRound();
+    }
+  }
+  e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; e.preventDefault(); });
+
+function readInput() {
+  if (!p1 || !p2) return;
+  // P1: WASD
+  p1.input.up = !!keys['KeyW'];
+  p1.input.down = !!keys['KeyS'];
+  p1.input.left = !!keys['KeyA'];
+  p1.input.right = !!keys['KeyD'];
+  // P2: Arrows
+  p2.input.up = !!keys['ArrowUp'];
+  p2.input.down = !!keys['ArrowDown'];
+  p2.input.left = !!keys['ArrowLeft'];
+  p2.input.right = !!keys['ArrowRight'];
+}
+
+// --- Update ---
+function update() {
+  frameCount++;
+
+  if (state === 'countdown') {
+    countdownTimer--;
+    if (countdownTimer <= 0) state = 'playing';
+    return;
+  }
+
+  if (state === 'roundEnd') {
+    countdownTimer--;
+    return;
+  }
+
+  if (state !== 'playing') return;
+
+  readInput();
+  p1.update();
+  p2.update();
+
+  // Car-car collision
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  if (dist < 16 && dist > 0) {
+    const nx = dx/dist, ny = dy/dist;
+    const push = (16 - dist) * 0.5;
+    p1.x -= nx * push; p1.y -= ny * push;
+    p2.x += nx * push; p2.y += ny * push;
+    // Bounce velocities
+    const relVx = p1.vx - p2.vx;
+    const relVy = p1.vy - p2.vy;
+    const dot = relVx * nx + relVy * ny;
+    p1.vx -= dot * nx * 0.7;
+    p1.vy -= dot * ny * 0.7;
+    p2.vx += dot * nx * 0.7;
+    p2.vy += dot * ny * 0.7;
+    screenShake(4, 8);
+    for (let i = 0; i < 6; i++) {
+      spawnParticle((p1.x+p2.x)/2, (p1.y+p2.y)/2, '#fff', 1);
+    }
+  }
+
+  // Powerup collection
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const pu = powerups[i];
+    pu.life--;
+    if (pu.life <= 0) { powerups.splice(i, 1); continue; }
+
+    const d1 = Math.sqrt((p1.x - pu.x)**2 + (p1.y - pu.y)**2);
+    const d2 = Math.sqrt((p2.x - pu.x)**2 + (p2.y - pu.y)**2);
+
+    if (d1 < 14) { p1.applyPowerup(pu.type); powerups.splice(i, 1); continue; }
+    if (d2 < 14) { p2.applyPowerup(pu.type); powerups.splice(i, 1); continue; }
+  }
+
+  // Spawn powerups
+  if (frameCount % 180 === 0 && powerups.length < 5) {
+    spawnPowerup();
+  }
+
+  // Particles
+  particles = particles.filter(p => {
+    p.x += p.vx; p.y += p.vy;
+    p.vx *= 0.95; p.vy *= 0.95;
+    p.life--;
+    return p.life > 0;
+  });
+
+  // Shake
+  if (shakeTimer > 0) shakeTimer--;
+
+  // Timer
+  timer--;
+  if (timer <= 0) endRound();
+}
+
+// --- Draw ---
+function draw() {
+  ctx.save();
+
+  // Screen shake
+  if (shakeTimer > 0) {
+    const s = shakeIntensity * (shakeTimer / 20);
+    ctx.translate((Math.random()-0.5)*s, (Math.random()-0.5)*s);
+  }
+
+  // Background
+  ctx.fillStyle = BG_COLOR;
+  ctx.fillRect(0, 0, W, H);
+
+  if (state === 'menu') {
+    drawMenu();
+    ctx.restore();
+    return;
+  }
+
+  if (state === 'gameOver') {
+    drawGameOver();
+    ctx.restore();
+    return;
+  }
+
+  // Draw arena background
+  ctx.fillStyle = '#0e0e22';
+  ctx.fillRect(AX - 2, AY - 2, COLS * CELL + 4, ROWS * CELL + 4);
+
+  // Draw grid
+  for (let y = 0; y < ROWS; y++) {
+    for (let x = 0; x < COLS; x++) {
+      const px = AX + x * CELL;
+      const py = AY + y * CELL;
+      const cell = grid[y][x];
+
+      if (cell === 9) {
+        ctx.fillStyle = WALL_COLOR;
+        roundRect(px + 1, py + 1, CELL - 2, CELL - 2, 2);
+        ctx.fill();
+        ctx.fillStyle = '#3a3a5a';
+        roundRect(px + 2, py + 2, CELL - 4, CELL - 6, 2);
+        ctx.fill();
+      } else if (cell === 1) {
+        ctx.fillStyle = P1_TRAIL;
+        ctx.fillRect(px, py, CELL, CELL);
+        ctx.fillStyle = 'rgba(255,68,102,0.15)';
+        ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+      } else if (cell === 2) {
+        ctx.fillStyle = P2_TRAIL;
+        ctx.fillRect(px, py, CELL, CELL);
+        ctx.fillStyle = 'rgba(68,170,255,0.15)';
+        ctx.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+      } else {
+        // Grid lines
+        ctx.fillStyle = GRID_COLOR;
+        ctx.fillRect(px, py, CELL, 1);
+        ctx.fillRect(px, py, 1, CELL);
+      }
+    }
+  }
+
+  // Arena border
+  ctx.strokeStyle = '#333355';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(AX - 1, AY - 1, COLS * CELL + 2, ROWS * CELL + 2);
+
+  // Powerups
+  for (const pu of powerups) {
+    const bob = Math.sin(frameCount * 0.08 + pu.bobPhase) * 3;
+    const fade = pu.life < 60 ? pu.life / 60 : 1;
+
+    ctx.save();
+    ctx.globalAlpha = fade;
+
+    // Glow
+    ctx.fillStyle = PU_COLORS[pu.type];
+    ctx.globalAlpha = fade * 0.3;
+    ctx.beginPath();
+    ctx.arc(pu.x, pu.y + bob, 12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Icon bg
+    ctx.globalAlpha = fade * 0.9;
+    ctx.fillStyle = '#1a1a2e';
+    ctx.beginPath();
+    ctx.arc(pu.x, pu.y + bob, 9, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Border
+    ctx.strokeStyle = PU_COLORS[pu.type];
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(pu.x, pu.y + bob, 9, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Icon
+    ctx.globalAlpha = fade;
+    ctx.font = '11px serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(PU_ICONS[pu.type], pu.x, pu.y + bob + 1);
+
+    ctx.restore();
+  }
+
+  // Players
+  if (p1) p1.draw();
+  if (p2) p2.draw();
+
+  // Particles
+  for (const p of particles) {
+    ctx.globalAlpha = p.life / p.maxLife;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * (p.life / p.maxLife), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // --- HUD ---
+  const [s1, s2] = countScores();
+  const total = COLS * ROWS - countWalls();
+
+  // Timer
+  const sec = Math.max(0, Math.ceil(timer / 60));
+  ctx.fillStyle = sec <= 10 ? '#ff4444' : '#aaaacc';
+  ctx.font = 'bold 28px "Segoe UI"';
+  ctx.textAlign = 'center';
+  ctx.fillText(sec + 's', W/2, 38);
+
+  // Round indicator
+  ctx.font = '13px "Segoe UI"';
+  ctx.fillStyle = '#666688';
+  ctx.fillText(`ROUND ${roundNum} / ${TOTAL_ROUNDS}`, W/2, 58);
+
+  // P1 score
+  ctx.textAlign = 'left';
+  ctx.fillStyle = P1_COLOR;
+  ctx.font = 'bold 22px "Segoe UI"';
+  ctx.fillText(`P1`, 20, 30);
+  ctx.font = '16px "Segoe UI"';
+  ctx.fillStyle = '#ddd';
+  ctx.fillText(`${s1} tiles`, 55, 30);
+  ctx.font = '11px "Segoe UI"';
+  ctx.fillStyle = '#888';
+  ctx.fillText(`WASD`, 20, 48);
+  // P1 wins dots
+  for (let i = 0; i < TOTAL_ROUNDS; i++) {
+    ctx.fillStyle = i < p1Wins ? P1_COLOR : '#333';
+    ctx.beginPath();
+    ctx.arc(22 + i * 14, 60, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // P2 score
+  ctx.textAlign = 'right';
+  ctx.fillStyle = P2_COLOR;
+  ctx.font = 'bold 22px "Segoe UI"';
+  ctx.fillText(`P2`, W - 55, 30);
+  ctx.font = '16px "Segoe UI"';
+  ctx.fillStyle = '#ddd';
+  ctx.fillText(`${s2} tiles`, W - 58, 30);
+  ctx.font = '11px "Segoe UI"';
+  ctx.fillStyle = '#888';
+  ctx.fillText(`ARROWS`, W - 20, 48);
+  // P2 wins dots
+  for (let i = 0; i < TOTAL_ROUNDS; i++) {
+    ctx.fillStyle = i < p2Wins ? P2_COLOR : '#333';
+    ctx.beginPath();
+    ctx.arc(W - 22 - i * 14, 60, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Territory bar
+  const barW = 200, barH = 6;
+  const barX = W/2 - barW/2, barY = 8;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(barX, barY, barW, barH);
+  const pct1 = total > 0 ? s1 / total : 0;
+  const pct2 = total > 0 ? s2 / total : 0;
+  ctx.fillStyle = P1_COLOR;
+  ctx.fillRect(barX, barY, barW * pct1, barH);
+  ctx.fillStyle = P2_COLOR;
+  ctx.fillRect(barX + barW - barW * pct2, barY, barW * pct2, barH);
+
+  // Countdown overlay
+  if (state === 'countdown') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(0, 0, W, H);
+    const num = Math.ceil(countdownTimer / 60);
+    const scale = 1 + (countdownTimer % 60) / 60 * 0.5;
+    ctx.save();
+    ctx.translate(W/2, H/2);
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 80px "Segoe UI"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = (countdownTimer % 60) / 60;
+    ctx.fillText(num > 0 ? num : 'GO!', 0, 0);
+    ctx.restore();
+  }
+
+  // Round end overlay
+  if (state === 'roundEnd') {
+    const alpha = Math.min(1, (240 - countdownTimer) / 30);
+    ctx.fillStyle = `rgba(0,0,0,${alpha * 0.7})`;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalAlpha = alpha;
+    ctx.textAlign = 'center';
+
+    const winner = s1 > s2 ? 'P1 WINS THE ROUND!' : s2 > s1 ? 'P2 WINS THE ROUND!' : 'ROUND DRAW!';
+    const winColor = s1 > s2 ? P1_COLOR : s2 > s1 ? P2_COLOR : '#fff';
+
+    ctx.fillStyle = winColor;
+    ctx.font = 'bold 36px "Segoe UI"';
+    ctx.fillText(winner, W/2, H/2 - 40);
+
+    ctx.fillStyle = '#ccc';
+    ctx.font = '20px "Segoe UI"';
+    ctx.fillText(`${s1} — ${s2}`, W/2, H/2 + 5);
+
+    ctx.fillStyle = '#888';
+    ctx.font = '14px "Segoe UI"';
+    ctx.fillText(`Score: P1 ${p1Wins} — ${p2Wins} P2`, W/2, H/2 + 35);
+
+    if (countdownTimer < 120) {
+      ctx.fillStyle = '#aaa';
+      ctx.font = '14px "Segoe UI"';
+      const nextText = (p1Wins >= 2 || p2Wins >= 2 || roundNum >= TOTAL_ROUNDS)
+        ? 'Press SPACE for results' : 'Press SPACE for next round';
+      ctx.fillText(nextText, W/2, H/2 + 70);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+}
+
+function countWalls() {
+  let w = 0;
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if (grid[y][x] === 9) w++;
+  return w;
+}
+
+function drawMenu() {
+  // Animated background tiles
+  const t = frameCount * 0.01;
+  for (let y = 0; y < Math.ceil(H/40); y++) {
+    for (let x = 0; x < Math.ceil(W/40); x++) {
+      const wave = Math.sin(x * 0.3 + t) * Math.cos(y * 0.3 + t * 0.7);
+      const alpha = 0.02 + wave * 0.02;
+      ctx.fillStyle = (x + y) % 2 === 0 ? `rgba(255,68,102,${alpha})` : `rgba(68,170,255,${alpha})`;
+      ctx.fillRect(x * 40, y * 40, 40, 40);
+    }
+  }
+
+  ctx.textAlign = 'center';
+
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 52px "Segoe UI"';
+  const titleY = H * 0.28;
+  ctx.fillText('TURBO TURF WARS', W/2, titleY);
+
+  // Subtitle
+  ctx.fillStyle = '#8888aa';
+  ctx.font = '16px "Segoe UI"';
+  ctx.fillText('Claim territory. Outsmart your opponent. Win the war.', W/2, titleY + 35);
+
+  // Controls
+  const cy = H * 0.52;
+  ctx.fillStyle = P1_COLOR;
+  ctx.font = 'bold 18px "Segoe UI"';
+  ctx.fillText('PLAYER 1', W/2 - 120, cy);
+  ctx.fillStyle = '#bbb';
+  ctx.font = '14px "Segoe UI"';
+  ctx.fillText('W A S D', W/2 - 120, cy + 25);
+
+  ctx.fillStyle = P2_COLOR;
+  ctx.font = 'bold 18px "Segoe UI"';
+  ctx.fillText('PLAYER 2', W/2 + 120, cy);
+  ctx.fillStyle = '#bbb';
+  ctx.font = '14px "Segoe UI"';
+  ctx.fillText('Arrow Keys', W/2 + 120, cy + 25);
+
+  // Powerup legend
+  const ly = H * 0.68;
+  ctx.fillStyle = '#777';
+  ctx.font = '13px "Segoe UI"';
+  ctx.fillText('POWER-UPS', W/2, ly - 15);
+  const puW = 90;
+  const startX = W/2 - (5 * puW) / 2;
+  for (let i = 0; i < 5; i++) {
+    const px = startX + i * puW + puW/2;
+    ctx.font = '18px serif';
+    ctx.fillText(PU_ICONS[i], px, ly + 8);
+    ctx.fillStyle = PU_COLORS[i];
+    ctx.font = '11px "Segoe UI"';
+    ctx.fillText(PU_NAMES[i], px, ly + 26);
+    ctx.fillStyle = '#777';
+  }
+
+  // Start prompt
+  const pulse = 0.6 + Math.sin(frameCount * 0.06) * 0.4;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 20px "Segoe UI"';
+  ctx.fillText('[ PRESS SPACE TO START ]', W/2, H * 0.85);
+  ctx.globalAlpha = 1;
+
+  // Best of 3
+  ctx.fillStyle = '#555';
+  ctx.font = '12px "Segoe UI"';
+  ctx.fillText(`Best of ${TOTAL_ROUNDS} rounds · ${ROUND_TIME}s each`, W/2, H * 0.92);
+}
+
+function drawGameOver() {
+  ctx.textAlign = 'center';
+
+  // Background effect
+  const t = frameCount * 0.008;
+  for (let y = 0; y < Math.ceil(H/40); y++) {
+    for (let x = 0; x < Math.ceil(W/40); x++) {
+      const wave = Math.sin(x * 0.2 + t) * Math.cos(y * 0.2 + t);
+      const winnerColor = p1Wins > p2Wins ? P1_COLOR : P2_COLOR;
+      ctx.fillStyle = `rgba(${p1Wins > p2Wins ? '255,68,102' : '68,170,255'},${0.03 + wave * 0.03})`;
+      ctx.fillRect(x * 40, y * 40, 40, 40);
+    }
+  }
+
+  const isTie = p1Wins === p2Wins;
+  const winner = p1Wins > p2Wins ? 'PLAYER 1' : 'PLAYER 2';
+  const winColor = p1Wins > p2Wins ? P1_COLOR : P2_COLOR;
+
+  ctx.font = 'bold 20px "Segoe UI"';
+  ctx.fillStyle = '#888';
+  ctx.fillText('GAME OVER', W/2, H * 0.3);
+
+  if (isTie) {
+    ctx.font = 'bold 48px "Segoe UI"';
+    ctx.fillStyle = '#fff';
+    ctx.fillText("IT'S A TIE!", W/2, H * 0.42);
+  } else {
+    ctx.font = 'bold 48px "Segoe UI"';
+    ctx.fillStyle = winColor;
+    ctx.fillText(`${winner} WINS!`, W/2, H * 0.42);
+  }
+
+  ctx.font = '22px "Segoe UI"';
+  ctx.fillStyle = '#aaa';
+  ctx.fillText(`${p1Wins} — ${p2Wins}`, W/2, H * 0.52);
+
+  // Trophy
+  ctx.font = '60px serif';
+  ctx.fillText('🏆', W/2, H * 0.66);
+
+  const pulse = 0.5 + Math.sin(frameCount * 0.06) * 0.5;
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px "Segoe UI"';
+  ctx.fillText('[ PRESS SPACE TO PLAY AGAIN ]', W/2, H * 0.82);
+  ctx.globalAlpha = 1;
+}
+
+// --- Game Loop ---
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
